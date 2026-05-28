@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from statistics import median
 from urllib.parse import quote
+import os 
 
 # -------------------------
 # CONFIG
@@ -23,6 +24,12 @@ OPENING_PARAMS = {
 }
 
 DB_PATH = "data/cases.db"
+
+os.makedirs(
+    "data",
+    exist_ok=True
+)
+
 
 today_ist = datetime.now(
     IST
