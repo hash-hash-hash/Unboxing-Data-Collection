@@ -20,7 +20,7 @@ OPENINGS_URL = "https://api.csgocasetracker.com/index.php"
 OPENING_PARAMS = {
     "route": "dailyData",
     "QUJ0GnBmPU3qbrKGDGYV":
-    "302d3bedf253e10bbd1bbe00b8b5aec8"
+    "ab6af47aa5adb7d3b30e9a0cdd0bf15f"
 }
 
 DB_PATH = "data/cases.db"
@@ -284,12 +284,30 @@ response = requests.get(
     timeout=20
 )
 
+print(
+    "Opening API Status:",
+    response.status_code
+)
+
+response.raise_for_status()
+
 cases = response.json()
+
+if not isinstance(
+    cases,
+    list
+):
+
+    raise Exception(
+        f"Unexpected API response: "
+        f"{cases}"
+    )
 
 logging.info(
     f"Cases fetched: "
     f"{len(cases)}"
 )
+
 
 for case in cases:
 
