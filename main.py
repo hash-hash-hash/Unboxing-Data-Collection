@@ -2,10 +2,14 @@ import requests
 import sqlite3
 import logging
 import time
+import hashlib
+import base64
+import os
+
+from Crypto.Cipher import AES
 from datetime import datetime, timezone, timedelta
 from statistics import median
 from urllib.parse import quote
-import os 
 
 # -------------------------
 # CONFIG
@@ -15,13 +19,18 @@ IST = timezone(
     timedelta(hours=5, minutes=30)
 )
 
-OPENINGS_URL = "https://api.csgocasetracker.com/index.php"
+USER_AGENT = (
+    "Mozilla/5.0 "
+    "(Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 "
+    "(KHTML, like Gecko) "
+    "Chrome/120.0.0.0 "
+    "Safari/537.36"
+)
 
-OPENING_PARAMS = {
-    "route": "dailyData",
-    "QUJ0GnBmPU3qbrKGDGYV":
-    "ab6af47aa5adb7d3b30e9a0cdd0bf15f"
-}
+OPENINGS_URL = (
+    "https://api.csgocasetracker.com/index.php"
+)
 
 DB_PATH = "data/cases.db"
 
@@ -29,7 +38,6 @@ os.makedirs(
     "data",
     exist_ok=True
 )
-
 
 today_ist = datetime.now(
     IST
@@ -59,32 +67,156 @@ conn = sqlite3.connect(
 cursor = conn.cursor()
 
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS case_daily_metrics (
 
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS
+case_daily_metrics (
 
-    snapshot_date TEXT NOT NULL,
+id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-    case_name TEXT NOT NULL,
+snapshot_date TEXT NOT NULL,
 
-    daily_openings INTEGER,
+case_name TEXT NOT NULL,
 
-    median_price REAL,
+daily_openings INTEGER,
 
-    sales_today INTEGER,
+median_price REAL,
 
-    fallback_used INTEGER,
+sales_today INTEGER,
 
-    collected_at TEXT,
+fallback_used INTEGER,
 
-    UNIQUE(
-        snapshot_date,
-        case_name
-    )
+collected_at TEXT,
+
+UNIQUE(
+snapshot_date,
+case_name
 )
+
+)
+
 """)
 
 conn.commit()
+
+# -------------------------
+# OPENINGS FETCH
+# -------------------------
+
+def get_opening_cases():
+
+    session = requests.Session()
+
+    session.headers.update({
+        "User-Agent":
+        USER_AGENT
+    })
+
+    logging.info(
+        "Fetching dynamic token..."
+    )
+
+    key_response = session.get(
+        "https://api.csgocasetracker.com/get_QUJ0GnBmPU3qbrKGDGYV.php",
+        timeout=20
+    )
+
+    key_response.raise_for_status()
+
+    server_data = (
+        key_response.json()
+    )
+
+    time_block = int(
+        time.time() // 900
+    )
+
+    secret = (
+        f"{USER_AGENT}"
+        f"{time_block}"
+    )
+
+    decrypt_key = hashlib.sha256(
+        secret.encode(
+            "utf-8"
+        )
+    ).digest()
+
+    ciphertext = base64.b64decode(
+        server_data["key"]
+    )
+
+    iv = base64.b64decode(
+        server_data["iv"]
+    )
+
+    cipher = AES.new(
+        decrypt_key,
+        AES.MODE_CBC,
+        iv
+    )
+
+    decrypted = cipher.decrypt(
+        ciphertext
+    )
+
+    padding = decrypted[-1]
+
+    token = decrypted[
+        :-padding
+    ].decode(
+        "utf-8"
+    )
+
+    logging.info(
+        f"Token generated"
+    )
+
+    response = session.get(
+        OPENINGS_URL,
+
+        params={
+
+            "route":
+            "dailyData",
+
+            "QUJ0GnBmPU3qbrKGDGYV":
+            token
+
+        },
+
+        timeout=20
+    )
+
+    print(
+        "Opening API Status:",
+        response.status_code
+    )
+
+    try:
+
+        response.raise_for_status()
+
+    except Exception:
+
+        print(
+            response.text[:1000]
+        )
+
+        raise
+
+    cases = response.json()
+
+    if not isinstance(
+        cases,
+        list
+    ):
+
+        raise Exception(
+            f"Bad response: "
+            f"{cases}"
+        )
+
+    return cases
 
 # -------------------------
 # SALES FETCH
@@ -132,8 +264,7 @@ def get_today_sales(
                 logging.warning(
                     f"429 -> "
                     f"{case_name} "
-                    f"waiting "
-                    f"{wait}s"
+                    f" wait={wait}s"
                 )
 
                 time.sleep(
@@ -144,9 +275,7 @@ def get_today_sales(
 
             response.raise_for_status()
 
-            sales = (
-                response.json()
-            )
+            sales = response.json()
 
             todays_prices = []
 
@@ -161,12 +290,12 @@ def get_today_sales(
                 if price is None:
                     continue
 
-                normalized_price = (
+                normalized = (
                     price / 100
                 )
 
                 all_prices.append(
-                    normalized_price
+                    normalized
                 )
 
                 sold_at = sale.get(
@@ -176,6 +305,7 @@ def get_today_sales(
                 if sold_at:
 
                     sold_time = (
+
                         datetime
                         .fromisoformat(
                             sold_at.replace(
@@ -183,9 +313,11 @@ def get_today_sales(
                                 "+00:00"
                             )
                         )
+
                         .astimezone(
                             IST
                         )
+
                     )
 
                     if (
@@ -195,7 +327,7 @@ def get_today_sales(
                     ):
 
                         todays_prices.append(
-                            normalized_price
+                            normalized
                         )
 
             SUCCESS += 1
@@ -203,7 +335,9 @@ def get_today_sales(
             if todays_prices:
 
                 return {
+
                     "median_price":
+
                     round(
                         median(
                             todays_prices
@@ -212,22 +346,25 @@ def get_today_sales(
                     ),
 
                     "sales_count":
+
                     len(
                         todays_prices
                     ),
 
                     "fallback":
+
                     False
+
                 }
 
-            latest_5 = (
-                all_prices[:5]
-            )
+            latest_5 = all_prices[:5]
 
             if latest_5:
 
                 return {
+
                     "median_price":
+
                     round(
                         median(
                             latest_5
@@ -236,13 +373,17 @@ def get_today_sales(
                     ),
 
                     "sales_count":
+
                     0,
 
                     "fallback":
+
                     True
+
                 }
 
             return {
+
                 "median_price":
                 None,
 
@@ -251,6 +392,7 @@ def get_today_sales(
 
                 "fallback":
                 False
+
             }
 
         except Exception as e:
@@ -264,6 +406,7 @@ def get_today_sales(
             time.sleep(5)
 
     return {
+
         "median_price":
         None,
 
@@ -272,48 +415,25 @@ def get_today_sales(
 
         "fallback":
         False
+
     }
 
 # -------------------------
 # MAIN
 # -------------------------
 
-response = requests.get(
-    OPENINGS_URL,
-    params=OPENING_PARAMS,
-    timeout=20
-)
-
-print(
-    "Opening API Status:",
-    response.status_code
-)
-
-response.raise_for_status()
-
-cases = response.json()
-
-if not isinstance(
-    cases,
-    list
-):
-
-    raise Exception(
-        f"Unexpected API response: "
-        f"{cases}"
-    )
+cases = get_opening_cases()
 
 logging.info(
     f"Cases fetched: "
     f"{len(cases)}"
 )
 
-
 for case in cases:
 
-    case_name = (
-        case["Case Name"]
-    )
+    case_name = case[
+        "Case Name"
+    ]
 
     openings = int(
         case[
@@ -352,26 +472,22 @@ for case in cases:
         datetime.now(
             IST
         ).isoformat()
+
     )
 
     cursor.execute("""
 
     INSERT OR IGNORE
+
     INTO case_daily_metrics (
 
-        snapshot_date,
-
-        case_name,
-
-        daily_openings,
-
-        median_price,
-
-        sales_today,
-
-        fallback_used,
-
-        collected_at
+    snapshot_date,
+    case_name,
+    daily_openings,
+    median_price,
+    sales_today,
+    fallback_used,
+    collected_at
 
     )
 

@@ -2,7 +2,7 @@ name: collect-case-data
 
 on:
   schedule:
-    - cron: "30 16 * * *"
+    - cron: "30 14 * * *"
 
   workflow_dispatch:
 
